@@ -164,7 +164,79 @@ gatekeeper_instance_ip = launch_ec2_instance(ec2, KEY_PAIR_NAME,gatekeeper_grp_i
 time.sleep(120)
 print("MySQL cluster setup complete.")
 
-######################## Securing the trusted host ######################## 
+######################## Securing the trusted host ########################
+def sftp_upload(sftp_client,local_file_path , remote_path):
+    # Upload the file
+    sftp_client.put(local_file_path, remote_path)
+    print(f"Successfully uploaded files")
+###############################################################  
+def upload_from_gatekeeper(gatekeeper_ip,proxy_ip, private_ip, key_pair_path,local_file_path):
+    remote_directory = "/home/ubuntu/my_project"
+    # key_path = get_path(key_file)
+    private_key = paramiko.RSAKey.from_private_key_file(key_pair_path)
+
+    # Set up SSH connection to the gatekeeper
+    gatekeeper_client = paramiko.SSHClient()
+    gatekeeper_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    gatekeeper_client.connect(gatekeeper_ip, username='ubuntu', pkey=private_key)
+
+    # SSH tunnel to private instance via gatekeeper
+    gatekeeper_transport = gatekeeper_client.get_transport()
+    dest_addr = (private_ip, 22)  # Private EC2 instance IP and SSH port
+    local_addr = ('0.0.0.0', 0)
+    
+    # Separate SSH client for the private instance
+    private_client = paramiko.SSHClient()
+    private_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        tunnel = gatekeeper_transport.open_channel('direct-tcpip', dest_addr, local_addr)
+        private_client.connect(private_ip, username='ubuntu', pkey=private_key, sock=tunnel)
+        print("SSH is available!")
+    except (paramiko.SSHException, Exception) as e:
+        print(f"SSH not available yet: {e}")
+        time.sleep(3)  # Wait before retrying
+    
+    # Use SFTP to upload the bash script to the private instance
+    sftp_client = private_client.open_sftp()      
+
+    try:
+        # Upload the security file to the private instance
+        print("Uploading security file to the trusted host...")
+        remote_file_path = remote_directory + "/security.sh"
+        print(f"Uploading file to {remote_file_path}")
+        try:
+            remote_file_path = remote_directory + "/security.sh"
+            sftp_client.put(local_file_path, remote_file_path)
+            print(local_file_path)
+            print(f"File uploaded to {remote_file_path}")
+        except Exception as e:
+             print(f"Failed to upload file via SFTP: {e}")
+        #Pass gatekeeper_instance_ip and trusted_host_instance_ip as arguments to the script
+        command = (
+            f"chmod +x {remote_file_path} && "
+            f"nohup {remote_file_path} {gatekeeper_ip} {proxy_ip} > {remote_directory}/security.log 2>&1 &"
+        )
+        # private_client.set_combine_stderr(True)
+        stdin, stdout, stderr = private_client.exec_command(command)
+        # Output ssh
+        channel = stdout.channel  # Get the Channel object for monitoring
+
+        # Wait for the command to complete and stream output
+        while not channel.exit_status_ready():
+            # Use select to check if there's data to read
+            if channel.recv_ready():
+                print(channel.recv(1024).decode("utf-8"), end="")  # Print command output
+        print(f"Security script executed successfully on {private_ip} with arguments: "
+              f"{gatekeeper_ip}, {proxy_ip}.")
+    except Exception as e:
+        print("Failed secure the trusted host: {e}")
+
+    # Close SFTP and SSH connection
+    sftp_client.close()
+    private_client.close()
+    tunnel.close()
+
+  
 print("Securing the Trusted Host...")
 SECURITY_FILE_PATH = "scripts\TrustedHost_security.sh"
 upload_from_gatekeeper(gatekeeper_instance_ip, proxy_instance_ip,trusted_host_instance_ip, key_pair_path,SECURITY_FILE_PATH)
